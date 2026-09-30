@@ -5,14 +5,16 @@
 #
 # Build:   docker build -t clm-serve:latest .
 #          # Pin the base image for reproducibility:
-#          docker build --build-arg BASE_IMAGE=mixa3607/pytorch-gfx906:v2.11.0-rocm-6.3.4 -t clm-serve:0.1 .
+#          docker build --build-arg BASE_IMAGE=aiinfos/vllm-gfx906-mobydick:latest -t clm-serve:0.1 .
 #
 # Run:     see docker/README.md
 #
 # Image layout:
-#   - Base:    mixa3607/pytorch-gfx906 (ships ROCm 6.3.x + PyTorch 2.11 built for
-#              gfx906). NOT mobydick/vLLM — vLLM's EngineCore segfaults inside
-#              libamdhip64.so on gfx906; transformers + plain torch works fine.
+#   - Base:    aiinfos/vllm-gfx906-mobydick (ships ROCm 6.3.x + PyTorch 2.11
+#              built for gfx906). The base image bundles a vLLM fork, but we
+#              never invoke it — vLLM's EngineCore segfaults inside
+#              libamdhip64.so on gfx906, so we run a plain `transformers`
+#              embedder (`clm-transformers-embedder`) instead.
 #   - User:    root (the gfx906 ROCm runtime relies on /dev/kfd, which is
 #              only readable by root on most hosts; we stay as root inside
 #              the container instead of creating a non-root user).
@@ -23,7 +25,21 @@
 # NOTE: gfx906 does NOT support bf16 natively; the encoder must run in fp16
 # (default) or fp32. bf16 silently up-casts to fp32 (very slow + 2× VRAM).
 #
-ARG BASE_IMAGE=mixa3607/pytorch-gfx906:v2.11.0-rocm-6.3.4
+# Base image: we use the public mobydick fork image (which is publicly
+# available on Docker Hub and ships ROCm 6.3.x + PyTorch 2.11 built for
+# gfx906). We do NOT use its vLLM (its EngineCore segfaults in
+# libamdhip64.so); we use only the PyTorch wheel + transformers.
+#
+# mobydick is a vLLM fork, so the base image installs vLLM as a side-effect
+# of building. We use `pip install --no-deps -e .` to avoid touching torch /
+# transformers, then explicitly ignore the vLLM install (it's unused).
+#
+# If mobydick is ever unpublished, fall back to building from ROCm
+# upstream: `FROM rocm/pytorch:rocm6.3.4_ubuntu22.04_py3.12_torch2.11` —
+# the wheel inside that image is not built for gfx906 (so HIP kernels
+# silently fall back to CPU emulation, slow), so mobydick is preferred.
+#
+ARG BASE_IMAGE=aiinfos/vllm-gfx906-mobydick:latest
 FROM ${BASE_IMAGE} AS base
 
 ENV PYTHONDONTWRITEBYTECODE=1 \

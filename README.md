@@ -67,12 +67,14 @@ docker run --rm -d --name clm \
 # logs:     $PWD/clm-logs/embedder.log  (survives `--rm`; tail -F it from another shell)
 ```
 
-**AMD Instinct MI50 / MI60 / Radeon VII (gfx906)** — uses the
-[`mixa3607/pytorch-gfx906`](https://hub.docker.com/r/mixa3607/pytorch-gfx906)
-PyTorch wheel image (ROCm 6.3.x + PyTorch 2.11 built for `gfx906`):
+**AMD Instinct MI50 / MI60 / Radeon VII (gfx906)** — uses the public
+[`aiinfos/vllm-gfx906-mobydick`](https://github.com/v-aleks/vllm-gfx906-mobydick)
+image (ROCm 6.3.x + PyTorch 2.11 built for `gfx906`). We use only the
+PyTorch wheel inside it — the vLLM fork's EngineCore segfaults in
+`libamdhip64.so`, so we run a plain `transformers` embedder instead:
 ```bash
 docker build \
-    --build-arg BASE_IMAGE=mixa3607/pytorch-gfx906:v2.11.0-rocm-6.3.4 \
+    --build-arg BASE_IMAGE=aiinfos/vllm-gfx906-mobydick:latest \
     -t clm-serve-rocm:latest .
 mkdir -p "$PWD/clm-logs"
 docker run --rm -d --name clm \

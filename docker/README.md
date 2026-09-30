@@ -11,8 +11,8 @@ browser ──► clm-serve  (FastAPI, :8700)   GET /  POST /v1/systemone  POST 
             transformers-embedder  (Qwen3-8B last-token, GPU, :8090)   /v1/embeddings
 ```
 
-The image is built on top of the gfx906 PyTorch wheel image
-[`mixa3607/pytorch-gfx906`](https://hub.docker.com/r/mixa3607/pytorch-gfx906),
+The image is built on top of the gfx906 vLLM fork image
+[`aiinfos/vllm-gfx906-mobydick`](https://github.com/v-aleks/vllm-gfx906-mobydick),
 which ships ROCm 6.3.x + PyTorch 2.11 built for `gfx906`. We use plain
 `transformers` (not vLLM) for the encoder, because vLLM's EngineCore
 subprocess segfaults inside `libamdhip64.so` on gfx906 — see the
@@ -53,7 +53,7 @@ Verify the host can see the GPU before touching Docker:
 
 ```bash
 docker run --rm --device=/dev/kfd --device=/dev/dri \
-    --group-add video --group-add render mixa3607/pytorch-gfx906:v2.11.0-rocm-6.3.4 rocm-smi
+    --group-add video --group-add render aiinfos/vllm-gfx906-mobydick:latest rocm-smi
 ```
 
 ---
@@ -66,13 +66,14 @@ docker build -t clm-serve:latest .
 
 # Reproducible: pin the gfx906 base image
 docker build \
-    --build-arg BASE_IMAGE=mixa3607/pytorch-gfx906:v2.11.0-rocm-6.3.4 \
+    --build-arg BASE_IMAGE=aiinfos/vllm-gfx906-mobydick:latest \
     -t clm-serve:0.1 .
 ```
 
-The first build pulls `mixa3607/pytorch-gfx906` (~10 GB) and adds the CLM
-package + `transformers` deps (~500 MB on top). Subsequent builds reuse
-cached layers.
+The first build pulls `aiinfos/vllm-gfx906-mobydick` (~10 GB) and adds the
+CLM package + `transformers` deps (~500 MB on top). The base image ships
+vLLM, but we never invoke it — we only use the PyTorch wheel it contains.
+Subsequent builds reuse cached layers.
 
 ---
 
