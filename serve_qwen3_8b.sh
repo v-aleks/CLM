@@ -1,46 +1,39 @@
 #!/bin/bash
-# Serve ONE Qwen3-8B pooling server as the encoder behind `clm-serve` on AMD
-# Instinct MI50 / MI60 / Radeon VII (gfx906). Lean settings so it coexists with
-# other GPU work: enforce-eager, modest util, short max-model-len (System One
-# states are short). LAST-token pooling + prefix cache, same as the precompute,
-# so the embeddings match what the head was trained on.
+# Serve the Qwen3-8B encoder as the embedder behind `clm-serve`.
 #
-# Requires a ROCm 6.3+ runtime with the gfx906 fork installed:
-#   https://github.com/v-aleks/vllm-gfx906-mobydick
+# This replaces the old vLLM-based serve_qwen3_8b.sh. On AMD Instinct
+# MI50 / MI60 / Radeon VII (gfx906) vLLM's EngineCore segfaults inside
+# libamdhip64.so, so we use the CLM transformers-based embedder instead —
+# it ships with the same pip package and uses the same OpenAI-compatible
+# `/v1/embeddings` endpoint as vLLM did.
 #
-# Usage: GPU=0 PORT=8090 UTIL=0.35 ./serve_qwen3_8b.sh
+# LAST-token pooling matches what the reference head was trained against
+# (CLM_v0.1-8B.pt was trained on Qwen3-8B last-token pooling from vLLM),
+# so `clm-serve` does not need to know the embedder backend changed.
+#
+# Requires a gfx906-compatible PyTorch wheel (e.g. the
+# `mixa3607/pytorch-gfx906:v2.11.0-rocm-6.3.4` Docker image, or any
+# ROCm-PyTorch build with `PYTORCH_ROCM_ARCH=gfx906`).
+#
+# Usage: GPU=0 PORT=8090 ./serve_qwen3_8b.sh
 set -u
 GPU="${GPU:-0}"
 PORT="${PORT:-8090}"
-UTIL="${UTIL:-0.4}"                  # 32 GB MI50; tighter than 0.55 to leave room for amdgpu overhead
 MAXLEN="${MAXLEN:-2048}"
-SEQ="${SEQ:-4}"                      # pooling-mode encoder; small batches are fine
 DTYPE="${DTYPE:-float16}"            # gfx906 has no native bf16 — keep fp16
 HSA_OVERRIDE_GFX_VERSION="${HSA_OVERRIDE_GFX_VERSION:-10.1.0}"
 PYTORCH_ROCM_ARCH="${PYTORCH_ROCM_ARCH:-gfx906}"
-FLASH_ATTENTION_TRITON_AMD_ENABLE="${FLASH_ATTENTION_TRITON_AMD_ENABLE:-TRUE}"
 LOGDIR="${LOGDIR:-$(cd "$(dirname "$0")/.." && pwd)/logs}"
 mkdir -p "$LOGDIR"
-echo "serving Qwen3-8B pooling on HIP ${GPU} port ${PORT} (util ${UTIL}, dtype ${DTYPE}, gfx ${HSA_OVERRIDE_GFX_VERSION})"
+echo "serving Qwen3-8B transformers-embedder on HIP ${GPU} port ${PORT} (dtype ${DTYPE}, gfx ${HSA_OVERRIDE_GFX_VERSION})"
 HIP_VISIBLE_DEVICES="$GPU" \
 HSA_OVERRIDE_GFX_VERSION="$HSA_OVERRIDE_GFX_VERSION" \
 PYTORCH_ROCM_ARCH="$PYTORCH_ROCM_ARCH" \
-FLASH_ATTENTION_TRITON_AMD_ENABLE="$FLASH_ATTENTION_TRITON_AMD_ENABLE" \
-TORCH_NCCL_ASYNC_ERROR_HANDLING=1 \
-NCCL_SOCKET_IFNAME=lo \
-NCCL_IB_DISABLE=1 \
-NCCL_P2P_DISABLE=1 \
-NCCL_NET_GDR_LEVEL=0 \
-NCCL_DEBUG="${NCCL_DEBUG:-INFO}" \
-VLLM_LOGGING_LEVEL="${VLLM_LOGGING_LEVEL:-INFO}" \
-VLLM_USE_V1="${VLLM_USE_V1:-0}" \
-exec vllm serve Qwen/Qwen3-8B \
-    --served-model-name qwen3-8b \
-    --runner pooling \
-    --enforce-eager \
-    --dtype "$DTYPE" \
-    --max-model-len "$MAXLEN" \
-    --gpu-memory-utilization "$UTIL" \
-    --max-num-seqs "$SEQ" \
+exec python -u -m clm.transformers_embedder \
+    --host 0.0.0.0 \
     --port "$PORT" \
-    >> "$LOGDIR/vllm_demo_8b.log" 2>&1
+    --model Qwen/Qwen3-8B \
+    --dtype "$DTYPE" \
+    --max-tokens "$MAXLEN" \
+    --device cuda \
+    >> "$LOGDIR/embedder_demo_8b.log" 2>&1

@@ -26,22 +26,24 @@ dependencies = [
     "torch>=2.1",
     "fastapi>=0.100",
     "uvicorn>=0.23",
-    # the Qwen3-8B embedder (GPU)
-    "vllm>=0.6",
+    # the Qwen3-8B embedder (transformers path; vLLM is no longer required —
+    # the gfx906 fork segfaults in libamdhip64.so inside EngineCore, while
+    # transformers + the mixa3607/pytorch-gfx906 wheel run cleanly).
+    "transformers>=4.45",
     # train/finetune.py: read the published Parquet embedding datasets
     "pyarrow>=14",
 ]
 
 [project.optional-dependencies]
-# kept for compatibility: serve and vllm are now installed by default
+# kept for compatibility: serve is no longer an extra; transformers handles embedding.
 serve = []
-vllm = []
 # download checkpoints from the Hugging Face Hub with the hub client (plain HTTPS works without it)
 hf = ["huggingface_hub>=0.20"]
 all = ["contrastive-lm[hf]"]
 
 [project.scripts]
 clm-serve = "clm.server:main"
+clm-transformers-embedder = "clm.transformers_embedder:main"
 clm-download = "clm.heads:download_main"
 
 [project.urls]

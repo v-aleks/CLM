@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Entrypoint for the CLM Docker image on AMD Instinct MI50 (gfx906).
 #
-# Starts the Qwen3-8B vLLM pooling encoder in the background, waits for it to
-# become ready, then execs `clm-serve` in the foreground (PID 1 is `tini`, so
-# both processes receive SIGTERM cleanly when the container is stopped).
+# Starts the Qwen3-8B transformers-embedder in the background, waits for it
+# to become ready, then execs `clm-serve` in the foreground (PID 1 is `tini`,
+# so both processes receive SIGTERM cleanly when the container is stopped).
 #
 # Required runtime flags on the host:
 #   --device=/dev/kfd --device=/dev/dri \
@@ -12,187 +12,101 @@
 # (NOT --gpus all — that is the CUDA/nvidia-container-toolkit path.)
 #
 # Environment variables (all optional):
-#   GPU                       - HIP device index visible inside the container (default: 0)
-#   VLLM_PORT                 - port for the vLLM /v1/embeddings server (default: 8090)
-#   VLLM_MAX_MODEL_LEN        - max sequence length for the encoder (default: 2048)
-#   VLLM_UTIL                 - gpu-memory-utilization for vLLM, 0..1 (default: 0.4)
-#   VLLM_MAX_NUM_SEQS         - max concurrent sequences in vLLM (default: 4)
-#   VLLM_DTYPE                - encoder dtype; MUST be float16 on gfx906 (default: float16)
-#   VLLM_LOGGING_LEVEL        - log verbosity for vLLM (default: DEBUG; INFO hides EngineCore errors)
-#   VLLM_USE_V1               - 0 = legacy single-process engine (avoids EngineCore segfault on gfx906),
-#                               1 = opt back into v1 (default: 0).
-#   VLLM_EXTRA_ARGS           - extra args appended to `vllm serve` (e.g. "--quantization awq_marlot")
-#   SKIP_VLLM                 - if "1", skip starting vLLM (use an external embedder)
-#   CLM_PORT                  - port for the FastAPI server (default: 8700)
-#   CLM_HOST                  - bind address for the FastAPI server (default: 0.0.0.0)
+#   CLM_EMB_PORT              - port for the transformers-embedder /v1/embeddings (default: 8090)
+#   CLM_EMB_MODEL             - HF model id for the encoder (default: Qwen/Qwen3-8B)
+#   CLM_EMB_DTYPE             - encoder dtype; MUST be float16 on gfx906 (default: float16)
+#   CLM_EMB_MAX_TOKENS        - truncate prompts to this many tokens (default: 2048)
+#   SKIP_EMBEDDER             - if "1", skip starting the embedder (use an external embedder URL)
+#   CLM_PORT                  - port for the clm-serve FastAPI server (default: 8700)
+#   CLM_HOST                  - bind address for clm-serve (default: 0.0.0.0)
 #   CLM_API_KEY               - if set, require `Authorization: Bearer <key>` on every request
 #   CLM_CKPT                  - path to a projection-head checkpoint; default: download
-#   CLM_DEVICE                - device for the heads (cpu or "cuda" alias for HIP; default: cuda)
+#   CLM_DEVICE                - device for the projection heads (cpu or "cuda" alias for HIP; default: cuda)
 #   HSA_OVERRIDE_GFX_VERSION  - ROCm virtual GFX version (default: 10.1.0)
-#   PYTORCH_ROCM_ARCH         - ROCm arch list for torch (default: gfx906)
-#   FLASH_ATTENTION_TRITON_AMD_ENABLE - flash-attn-gfx906 toggle (default: TRUE)
-#   NCCL_DEBUG                - NCCL/RCCL log verbosity (default: INFO; flip to WARN after a clean first boot)
-#   VLLM_READY_TIMEOUT        - seconds to wait for vLLM /v1/models (default: 300).
-#                               Raise to 900–1500 once gfx906 cold-load is known to work.
-#   LOGDIR                    - directory for vLLM logs (default: /logs)
+#   CLM_READY_TIMEOUT         - seconds to wait for embedder /v1/models (default: 600).
+#                               Qwen3-8B cold-load on gfx906 takes 5-10 minutes; raise if needed.
+#   LOGDIR                    - directory for logs (default: /logs)
 #   HF_TOKEN                  - Hugging Face token for gated/private repos (optional)
 
 set -euo pipefail
 
-: "${GPU:=0}"
-: "${VLLM_PORT:=8090}"
-: "${VLLM_MAX_MODEL_LEN:=2048}"
-# The 32 GB MI50 is tight even for Qwen3-8B FP16 alone (16 GB weights).
-# vLLM's gpu-memory-utilization allocates a contiguous block up-front; if
-# it leaves less than ~6 GB for amdgpu / KFD page tables + PyTorch allocator
-# slack + the (independent) EngineCore subprocess, EngineCore dies silently
-# after `init_process_group` with no traceback and APIServer reports "Engine
-# core initialization failed". 0.55 is the highest value that worked on a
-# single MI50 in our tests.
-: "${VLLM_UTIL:=0.4}"     # 32 GB × 0.4 = 12.8 GB; Qwen3-8B FP16 = 16 GB already fits inside.
-                                   # vLLM treats util as the KV-cache+activation budget,
-                                   # not the weight budget, so 0.4 leaves ~3 GB of slack
-                                   # for amdgpu / pyroc page tables on top of weights.
-: "${VLLM_MAX_NUM_SEQS:=4}"           # pool encoder is small; smaller batches ease KV-cache pressure
-: "${VLLM_DTYPE:=float16}"
-: "${VLLM_LOGGING_LEVEL:=DEBUG}"      # DEBUG until we know gfx906 boots; flip to INFO once stable
-# vLLM v1 ships an EngineCore subprocess that segfaults on gfx906 in
-# libamdhip64.so 7.2.x (see mobydick issue tracker). v0 (legacy) uses a single
-# process and avoids that crash. Set to 1 to opt back into v1 once an image
-# with the fix is published.
-: "${VLLM_USE_V1:=0}"
-: "${VLLM_EXTRA_ARGS:=}"
-: "${SKIP_VLLM:=0}"
+: "${CLM_EMB_PORT:=8090}"
+: "${CLM_EMB_MODEL:=Qwen/Qwen3-8B}"
+: "${CLM_EMB_DTYPE:=float16}"
+: "${CLM_EMB_MAX_TOKENS:=2048}"
+: "${SKIP_EMBEDDER:=0}"
 : "${CLM_PORT:=8700}"
 : "${CLM_HOST:=0.0.0.0}"
 : "${CLM_API_KEY:=}"
 : "${CLM_CKPT:=}"
 : "${CLM_DEVICE:=cuda}"
 : "${HSA_OVERRIDE_GFX_VERSION:=10.1.0}"
-: "${PYTORCH_ROCM_ARCH:=gfx906}"
-: "${FLASH_ATTENTION_TRITON_AMD_ENABLE:=TRUE}"
-: "${NCCL_DEBUG:=INFO}"    # INFO shows which transport NCCL chose; flip to WARN after a clean first boot
-# Cold-load Qwen3-8B FP16 on gfx906 takes ~8–15 minutes; for iterative
-# debugging we default to 5 minutes so a broken build fails fast. Override
-# with `-e VLLM_READY_TIMEOUT=1500` (or any value) once you're confident
-# vLLM eventually boots.
-: "${VLLM_READY_TIMEOUT:=300}"
+: "${CLM_READY_TIMEOUT:=600}"
 : "${LOGDIR:=/logs}"
 
 mkdir -p "$LOGDIR"
 echo "[entrypoint] HF_HOME=${HF_HOME:-/models/hf}  CLM_CKPT_DIR=${CLM_CKPT_DIR:-/models/clm}"
-echo "[entrypoint] ROCm gfx=${HSA_OVERRIDE_GFX_VERSION}  PYTORCH_ROCM_ARCH=${PYTORCH_ROCM_ARCH}  flash-triton=${FLASH_ATTENTION_TRITON_AMD_ENABLE}"
+echo "[entrypoint] ROCm gfx=${HSA_OVERRIDE_GFX_VERSION}"
 
-start_vllm() {
-  echo "[entrypoint] starting vLLM Qwen3-8B on HIP device ${GPU}, port ${VLLM_PORT}"
-  echo "[entrypoint]   max-model-len=${VLLM_MAX_MODEL_LEN}  gpu-mem-util=${VLLM_UTIL}  max-num-seqs=${VLLM_MAX_NUM_SEQS}  dtype=${VLLM_DTYPE}"
-  echo "[entrypoint]   logging-level=${VLLM_LOGGING_LEVEL}"
-  if [[ -n "${VLLM_EXTRA_ARGS}" ]]; then
-    echo "[entrypoint]   extra args: ${VLLM_EXTRA_ARGS}"
-  fi
+start_embedder() {
+  echo "[entrypoint] starting transformers-embedder on ${CLM_EMB_PORT}, model=${CLM_EMB_MODEL}, dtype=${CLM_EMB_DTYPE}"
 
-  # Surface the host's free VRAM so a silent OOM on gfx906 is easy to spot.
-  if command -v rocm-smi >/dev/null 2>&1; then
-    echo "[entrypoint] --- rocm-smi ---"
-    rocm-smi --showproductname --showmeminfo vram 2>&1 | head -20 || true
-    echo "[entrypoint] ---------------"
-  fi
+  # gfx906 does not implement bf16 — if CLM_EMB_DTYPE is set to bf16 the
+  # encoder will silently up-cast weights, doubling VRAM and tanking
+  # throughput. Refuse to start in that case.
+  case "${CLM_EMB_DTYPE}" in
+    float16|fp16|float32|fp32) : ;;
+    *)
+      echo "[entrypoint] WARNING: CLM_EMB_DTYPE=${CLM_EMB_DTYPE} is not supported on gfx906; falling back to float16." >&2
+      CLM_EMB_DTYPE="float16"
+      ;;
+  esac
 
-  # gfx906 does not implement bf16 — if VLLM_DTYPE is left at bf16 vLLM will silently
-  # up-cast weights, doubling VRAM and tanking throughput. Refuse to start in that case.
-  if [[ "${VLLM_DTYPE}" != "float16" && "${VLLM_DTYPE}" != "fp16" && "${VLLM_DTYPE}" != "float32" ]]; then
-    echo "[entrypoint] WARNING: VLLM_DTYPE=${VLLM_DTYPE} is not supported on gfx906; falling back to float16." >&2
-    VLLM_DTYPE="float16"
-  fi
+  HIP_VISIBLE_DEVICES="${GPU:-0}" \
+             HSA_OVERRIDE_GFX_VERSION="${HSA_OVERRIDE_GFX_VERSION}" \
+             PYTORCH_ROCM_ARCH="${PYTORCH_ROCM_ARCH:-gfx906}" \
+             python -u -m clm.transformers_embedder \
+                 --host 0.0.0.0 \
+                 --port "${CLM_EMB_PORT}" \
+                 --model "${CLM_EMB_MODEL}" \
+                 --dtype "${CLM_EMB_DTYPE}" \
+                 --max-tokens "${CLM_EMB_MAX_TOKENS}" \
+                 --device "${CLM_DEVICE}" \
+                 >> "${LOGDIR}/embedder.log" 2>&1 &
+  EMBEDDER_PID=$!
+  echo "[entrypoint] embedder PID=${EMBEDDER_PID}; logs -> ${LOGDIR}/embedder.log"
+  trap 'echo "[entrypoint] stopping embedder (PID=${EMBEDDER_PID})"; kill "${EMBEDDER_PID}" 2>/dev/null || true; wait "${EMBEDDER_PID}" 2>/dev/null || true' EXIT
 
-  # We deliberately do NOT pass --enable-prefix-caching: pooling-mode encoders cache
-  # last-token outputs and the prefix-cache manager allocates a sizeable
-  # scratch buffer that's easy to OOM on a single MI50. Re-enable locally if
-  # you have headroom via VLLM_EXTRA_ARGS.
-  #
-  # vLLM v1 always runs `torch.distributed.init_process_group(backend='nccl')`
-  # even for single-GPU — RCCL on gfx906 ships with the mobydick image but the
-  # defaults try InfiniBand / GPU-direct P2P that don't exist inside Docker,
-  # so the rendezvous hangs and EngineCore never replies. The four NCCL_*
-  # vars below force a pure TCP/loopback handshake, which works on a single
-  # MI50 in a single container. (Multi-GPU rigs will need different settings.)
-  #
-  # HIP_LAUNCH_BLOCKING=1 makes HIP errors synchronous (kills the process with
-  # a stack trace) instead of silently queuing work that later crashes inside
-  # EngineCore — essential when gfx906 OOMs on the model load.
-  #
-  # TORCH_DISTRIBUTED_DEBUG=DETAIL forces torch.distributed to print what
-  # every rank is doing, which is the only way to see why the single-rank
-  # EngineCore is silent after init_process_group.
-  #
-  # We launch through `python -u -m vllm.entrypoints.openai.api_server` rather
-  # than the `vllm` console script. This way the EngineCore subprocess inherits
-  # the same stdout/stderr fds via multiprocessing.spawn's fd inheritance, and
-  # any silent OOM tracebacks actually land in our vllm.log instead of being
-  # swallowed by the wrapper script.
-  #
-  # shellcheck disable=SC2086
-  HIP_VISIBLE_DEVICES="${GPU}" \
-  HSA_OVERRIDE_GFX_VERSION="${HSA_OVERRIDE_GFX_VERSION}" \
-  PYTORCH_ROCM_ARCH="${PYTORCH_ROCM_ARCH}" \
-  FLASH_ATTENTION_TRITON_AMD_ENABLE="${FLASH_ATTENTION_TRITON_AMD_ENABLE}" \
-  HIP_LAUNCH_BLOCKING=1 \
-  TORCH_DISTRIBUTED_DEBUG=DETAIL \
-  TORCH_NCCL_ASYNC_ERROR_HANDLING=1 \
-  NCCL_SOCKET_IFNAME=lo \
-  NCCL_IB_DISABLE=1 \
-  NCCL_P2P_DISABLE=1 \
-  NCCL_NET_GDR_LEVEL=0 \
-  NCCL_DEBUG="${NCCL_DEBUG:-INFO}" \
-  VLLM_LOGGING_LEVEL="${VLLM_LOGGING_LEVEL}" \
-  VLLM_USE_V1="${VLLM_USE_V1}" \
-  python -u -m vllm.entrypoints.openai.api_server \
-      --model Qwen/Qwen3-8B \
-      --served-model-name qwen3-8b \
-      --runner pooling \
-      --enforce-eager \
-      --dtype "${VLLM_DTYPE}" \
-      --max-model-len "${VLLM_MAX_MODEL_LEN}" \
-      --gpu-memory-utilization "${VLLM_UTIL}" \
-      --max-num-seqs "${VLLM_MAX_NUM_SEQS}" \
-      --port "${VLLM_PORT}" \
-      ${VLLM_EXTRA_ARGS} \
-      >> "${LOGDIR}/vllm.log" 2>&1 &
-  VLLM_PID=$!
-
-  echo "[entrypoint] vLLM PID=${VLLM_PID}; logs -> ${LOGDIR}/vllm.log"
-  trap 'echo "[entrypoint] stopping vLLM (PID=${VLLM_PID})"; kill "${VLLM_PID}" 2>/dev/null || true; wait "${VLLM_PID}" 2>/dev/null || true' EXIT
-
-  echo "[entrypoint] waiting for vLLM at http://127.0.0.1:${VLLM_PORT}/v1/models (timeout=${VLLM_READY_TIMEOUT}s) ..."
-  if ! /usr/local/bin/wait_for_url.sh "http://127.0.0.1:${VLLM_PORT}/v1/models" "${VLLM_READY_TIMEOUT}" 5; then
-    echo "[entrypoint] vLLM failed to become ready in ${VLLM_READY_TIMEOUT}s; tail of log:" >&2
-    echo "[entrypoint] ---------------- vllm.log (last 1000 lines) ----------------" >&2
-    tail -1000 "${LOGDIR}/vllm.log" >&2 || true
-    echo "[entryentry] --------------------------------------------------------" >&2
+  echo "[entrypoint] waiting for embedder at http://127.0.0.1:${CLM_EMB_PORT}/v1/models (timeout=${CLM_READY_TIMEOUT}s) ..."
+  if ! /usr/local/bin/wait_for_url.sh "http://127.0.0.1:${CLM_EMB_PORT}/v1/models" "${CLM_READY_TIMEOUT}" 5; then
+    echo "[entrypoint] embedder failed to become ready in ${CLM_READY_TIMEOUT}s; tail of log:" >&2
+    echo "[entrypoint] ---------------- embedder.log (last 500 lines) ----------------" >&2
+    tail -500 "${LOGDIR}/embedder.log" >&2 || true
+    echo "[entrypoint] --------------------------------------------------------" >&2
     exit 1
   fi
-  echo "[entrypoint] vLLM is up"
+  echo "[entrypoint] embedder is up"
 }
 
-if [[ "${SKIP_VLLM}" != "1" ]]; then
-  start_vllm
+if [[ "${SKIP_EMBEDDER}" != "1" ]]; then
+  start_embedder
 else
-  echo "[entrypoint] SKIP_VLLM=1, not starting vLLM (CLM_EMB_URL=${CLM_EMB_URL:-})"
+  echo "[entrypoint] SKIP_EMBEDDER=1, not starting embedder (CLM_EMB_URL=${CLM_EMB_URL:-})"
 fi
 
 echo "[entrypoint] starting clm-serve on ${CLM_HOST}:${CLM_PORT}"
 export CLM_API_KEY CLM_DEVICE
 if [[ -n "${CLM_CKPT}" ]]; then
   exec clm-serve --host "${CLM_HOST}" --port "${CLM_PORT}" \
-      --emb-url "http://127.0.0.1:${VLLM_PORT}/v1/embeddings" \
+      --emb-url "http://127.0.0.1:${CLM_EMB_PORT}/v1/embeddings" \
       --emb-model qwen3-8b \
-      --max-tokens "${VLLM_MAX_MODEL_LEN}" \
+      --max-tokens "${CLM_EMB_MAX_TOKENS}" \
       --device "${CLM_DEVICE}" \
       --ckpt "${CLM_CKPT}"
 else
   exec clm-serve --host "${CLM_HOST}" --port "${CLM_PORT}" \
-      --emb-url "http://127.0.0.1:${VLLM_PORT}/v1/embeddings" \
+      --emb-url "http://127.0.0.1:${CLM_EMB_PORT}/v1/embeddings" \
       --emb-model qwen3-8b \
-      --max-tokens "${VLLM_MAX_MODEL_LEN}" \
+      --max-tokens "${CLM_EMB_MAX_TOKENS}" \
       --device "${CLM_DEVICE}"
 fi

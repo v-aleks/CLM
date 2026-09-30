@@ -50,11 +50,10 @@ pip install -e .
 
 ### Run in Docker (one container, GPU)
 
-For a self-contained deployment that launches both `vllm` (Qwen3-8B
-pooling encoder) and `clm-serve` inside a single image, see
-[`docker/README.md`](docker/README.md).
+For a self-contained deployment that launches the **Qwen3-8B embedder +
+`clm-serve`** inside a single image, see [`docker/README.md`](docker/README.md).
 
-**NVIDIA / CUDA host** (default image, `vllm/vllm-openai:latest`):
+**NVIDIA / CUDA host** (uses the upstream `transformers` + `torch`, no vLLM):
 ```bash
 docker build -t clm-serve:latest .
 mkdir -p "$PWD/clm-logs"
@@ -65,15 +64,15 @@ docker run --rm -d --name clm \
     -v "$PWD/clm-logs:/logs" \
     clm-serve:latest
 # playground: http://localhost:8700/
-# logs:     $PWD/clm-logs/vllm.log  (survives `--rm`; tail -F it from another shell)
+# logs:     $PWD/clm-logs/embedder.log  (survives `--rm`; tail -F it from another shell)
 ```
 
 **AMD Instinct MI50 / MI60 / Radeon VII (gfx906)** — uses the
-[`aiinfos/vllm-gfx906-mobydick`](https://github.com/v-aleks/vllm-gfx906-mobydick)
-fork of vLLM:
+[`mixa3607/pytorch-gfx906`](https://hub.docker.com/r/mixa3607/pytorch-gfx906)
+PyTorch wheel image (ROCm 6.3.x + PyTorch 2.11 built for `gfx906`):
 ```bash
 docker build \
-    --build-arg VLLM_IMAGE=aiinfos/vllm-gfx906-mobydick:latest \
+    --build-arg BASE_IMAGE=mixa3607/pytorch-gfx906:v2.11.0-rocm-6.3.4 \
     -t clm-serve-rocm:latest .
 mkdir -p "$PWD/clm-logs"
 docker run --rm -d --name clm \
@@ -85,7 +84,7 @@ docker run --rm -d --name clm \
     -v "$PWD/clm-logs:/logs" \
     clm-serve-rocm:latest
 # playground: http://localhost:8700/
-# logs:     $PWD/clm-logs/vllm.log  (survives `--rm`; tail -F it from another shell)
+# logs:     $PWD/clm-logs/embedder.log  (survives `--rm`; tail -F it from another shell)
 ```
 
 ---
@@ -94,20 +93,24 @@ docker run --rm -d --name clm \
 
 ### Serve
 
+The encoder now ships inside the same `pip install contrastive-lm` package
+as a small `transformers` server. No vLLM required.
+
 ```bash
 # 1. encoder (Qwen3-8B embeddings)
 #    On AMD gfx906 the dtype flag is REQUIRED — bfloat16 is not native there
 #    and would silently fall back to float32.
-vllm serve Qwen/Qwen3-8B \
-    --served-model-name qwen3-8b --runner pooling \
-    --dtype float16 --max-model-len 2048 --port 8090 &
+HIP_VISIBLE_DEVICES=0 \
+HSA_OVERRIDE_GFX_VERSION=10.1.0 \
+clm-transformers-embedder \
+    --host 0.0.0.0 --port 8090 --dtype float16 --max-tokens 2048 &
 
 # 2. CLM API on :8700 (downloads the 75 MB reference head on first run)
 clm-serve
 ```
 
-States longer than 2048 tokens are truncated. For longer states, raise both limits
-together, e.g. `--max-model-len 8192` on `vllm serve` and `clm-serve --max-tokens 8192`
+States longer than 2048 tokens are truncated. For longer states, raise both
+limits together, e.g. `--max-tokens 8192` on both processes
 (needs more GPU memory).
 
 ### Ask typed questions about a state
