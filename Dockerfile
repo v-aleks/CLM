@@ -79,9 +79,14 @@ COPY src ./src
 # CLM package itself (`--no-deps -e .`), (b) install the CLM deps that are NOT
 # in the base image (`uvicorn`; vLLM's `fastapi[standard]` ≥ 0.133 satisfies
 # `fastapi>=0.100`), and (c) the small extras the examples need (`httpx`).
-RUN pip install --upgrade pip \
-    && pip install --no-deps -e . \
-    && pip install "uvicorn>=0.23" "httpx>=0.25"
+#
+# NB: do NOT `pip install --upgrade pip` — the gfx906 base image ships pip as
+# a debian package (apt-installed, no RECORD metadata), so `pip install
+# --upgrade pip` aborts with "Cannot uninstall pip 24.0, RECORD file not
+# found". The system pip (≥ 22) understands `--no-deps -e .` and the wheel
+# format, so we just use it as-is.
+RUN pip install --no-deps -e . \
+    && pip install --no-deps "uvicorn>=0.23" "httpx>=0.25"
 
 # Entrypoint + helper. Re-owned by root so they sit in a system path and can
 # be invoked without PATH gymnastics.
