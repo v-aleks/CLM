@@ -12,7 +12,11 @@
 # Image layout:
 #   - Base:    aiinfos/vllm-gfx906-mobydick (ships ROCm 6.3.4 + PyTorch 2.11
 #              built for gfx906 + vLLM fork + flash-attention-gfx906).
-#   - User:    non-root `clm` (UID 1000).
+#   - User:    root (the gfx906 fork relies on /dev/kfd, which is only readable
+#              by root on most hosts; we deliberately stay as root inside the
+#              container instead of creating a non-root user — the previous
+#              attempt to create `clm:1000` failed because `useradd` is not
+#              present in this base image).
 #   - WORKDIR: /opt/clm  (clm package installed editable).
 #   - Volumes: /models (HF cache + reference head), /logs (vLLM + uvicorn).
 #   - Ports:   8090 (vLLM /v1/embeddings), 8700 (clm-serve API + playground).
@@ -44,9 +48,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     # when both runtimes are present (e.g. dual-socket dev boxes).
     NVIDIA_VISIBLE_DEVICES=
 
-# System tools. The base image already has bash, curl is added for the
-# healthcheck, tini for proper PID-1 signal handling, ca-certificates for
-# HTTPS calls (Qwen3-8B + HF download).
+# We deliberately stay as root for the whole image (see header). The base
+# image ships most of what we need; we add:
+#   - curl   : for the /health probe
+#   - tini   : for proper PID-1 signal handling
+#   - ca-certificates : HTTPS to Qwen3-8B / Hugging Face
 USER root
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -55,11 +61,6 @@ RUN apt-get update \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Non-root user. UID/GID 1000 to match the typical host user; easy to override
-# at runtime via `--user $(id -u):$(id -g)` if needed.
-RUN groupadd -g 1000 clm 2>/dev/null || true \
-    && useradd  -u 1000 -g clm -m -s /bin/bash clm 2>/dev/null || true
-
 WORKDIR /opt/clm
 
 # Copy only package metadata first so that the (slow) `pip install` step is
@@ -67,26 +68,23 @@ WORKDIR /opt/clm
 # does `pip install -e .` without `--no-deps`, which would re-resolve
 # torch/vllm against the wheels already in the base image (and possibly
 # downgrade them). See the `RUN pip install` block below.
-COPY --chown=clm:clm pyproject.toml README.md ./
-COPY --chown=clm:clm src ./src
+COPY pyproject.toml README.md ./
+COPY src ./src
 
-# Install as the non-root user. We deliberately do NOT resolve CLM's runtime
-# dependencies (torch / vllm / fastapi / numpy / requests) — they are already
-# installed in the base image at versions compatible with
-# `aiinfos/vllm-gfx906-mobydick` (PyTorch 2.11.0 + ROCm 6.3.4 + vLLM fork),
-# and re-resolving them risks a torch downgrade or a vLLM wheel mismatch. We
-# only need to (a) install the CLM package itself (`--no-deps -e .`),
-# (b) install the CLM deps that are NOT in the base image (`uvicorn`; vLLM's
-# `fastapi[standard]` ≥ 0.133 satisfies `fastapi>=0.100`), and (c) the small
-# extras the examples need (`httpx`).
-USER clm
+# Install as root. We deliberately do NOT resolve CLM's runtime dependencies
+# (torch / vllm / fastapi / numpy / requests) — they are already installed in
+# the base image at versions compatible with `aiinfos/vllm-gfx906-mobydick`
+# (PyTorch 2.11.0 + ROCm 6.3.4 + vLLM fork), and re-resolving them risks a
+# torch downgrade or a vLLM wheel mismatch. We only need to (a) install the
+# CLM package itself (`--no-deps -e .`), (b) install the CLM deps that are NOT
+# in the base image (`uvicorn`; vLLM's `fastapi[standard]` ≥ 0.133 satisfies
+# `fastapi>=0.100`), and (c) the small extras the examples need (`httpx`).
 RUN pip install --upgrade pip \
     && pip install --no-deps -e . \
     && pip install "uvicorn>=0.23" "httpx>=0.25"
 
 # Entrypoint + helper. Re-owned by root so they sit in a system path and can
 # be invoked without PATH gymnastics.
-USER root
 COPY --chmod=0755 docker/entrypoint.sh      /usr/local/bin/entrypoint.sh
 COPY --chmod=0755 docker/wait_for_url.sh    /usr/local/bin/wait_for_url.sh
 
@@ -113,10 +111,7 @@ ENV HF_HOME=/models/hf \
     GPU=0
 
 # Prepare writable mount points for HF cache, reference head and logs.
-RUN mkdir -p /models/hf/hub /models/clm /logs \
-    && chown -R clm:clm /models /logs
-
-USER clm
+RUN mkdir -p /models/hf/hub /models/clm /logs
 
 EXPOSE 8090 8700
 
