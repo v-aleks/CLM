@@ -30,6 +30,8 @@
 #   PYTORCH_ROCM_ARCH         - ROCm arch list for torch (default: gfx906)
 #   FLASH_ATTENTION_TRITON_AMD_ENABLE - flash-attn-gfx906 toggle (default: TRUE)
 #   NCCL_DEBUG                - NCCL/RCCL log verbosity (default: INFO; flip to WARN after a clean first boot)
+#   VLLM_READY_TIMEOUT        - seconds to wait for vLLM /v1/models (default: 300).
+#                               Raise to 900–1500 once gfx906 cold-load is known to work.
 #   LOGDIR                    - directory for vLLM logs (default: /logs)
 #   HF_TOKEN                  - Hugging Face token for gated/private repos (optional)
 
@@ -60,6 +62,11 @@ set -euo pipefail
 : "${PYTORCH_ROCM_ARCH:=gfx906}"
 : "${FLASH_ATTENTION_TRITON_AMD_ENABLE:=TRUE}"
 : "${NCCL_DEBUG:=INFO}"    # INFO shows which transport NCCL chose; flip to WARN after a clean first boot
+# Cold-load Qwen3-8B FP16 on gfx906 takes ~8–15 minutes; for iterative
+# debugging we default to 5 minutes so a broken build fails fast. Override
+# with `-e VLLM_READY_TIMEOUT=1500` (or any value) once you're confident
+# vLLM eventually boots.
+: "${VLLM_READY_TIMEOUT:=300}"
 : "${LOGDIR:=/logs}"
 
 mkdir -p "$LOGDIR"
@@ -128,12 +135,9 @@ start_vllm() {
   echo "[entrypoint] vLLM PID=${VLLM_PID}; logs -> ${LOGDIR}/vllm.log}"
   trap 'echo "[entrypoint] stopping vLLM (PID=${VLLM_PID})"; kill "${VLLM_PID}" 2>/dev/null || true; wait "${VLLM_PID}" 2>/dev/null || true' EXIT
 
-  echo "[entrypoint] waiting for vLLM at http://127.0.0.1:${VLLM_PORT}/v1/models ..."
-  # gfx906 cold-load is slow: 16 GB of Qwen3-8B FP16 weights + kv-cache alloc +
-  # rope/fused-kernel JIT can easily take 8–15 minutes on a single MI50. Allow
-  # 25 minutes and dump a richer tail on abort so the root cause is visible.
-  if ! /usr/local/bin/wait_for_url.sh "http://127.0.0.1:${VLLM_PORT}/v1/models" 1500 5; then
-    echo "[entrypoint] vLLM failed to become ready in 1500s; tail of log:" >&2
+  echo "[entrypoint] waiting for vLLM at http://127.0.0.1:${VLLM_PORT}/v1/models (timeout=${VLLM_READY_TIMEOUT}s) ..."
+  if ! /usr/local/bin/wait_for_url.sh "http://127.0.0.1:${VLLM_PORT}/v1/models" "${VLLM_READY_TIMEOUT}" 5; then
+    echo "[entrypoint] vLLM failed to become ready in ${VLLM_READY_TIMEOUT}s; tail of log:" >&2
     echo "[entrypoint] ---------------- vllm.log (last 1000 lines) ----------------" >&2
     tail -1000 "${LOGDIR}/vllm.log" >&2 || true
     echo "[entryentry] --------------------------------------------------------" >&2
