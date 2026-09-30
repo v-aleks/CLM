@@ -125,7 +125,7 @@ ENV HF_HOME=/models/hf \
     VLLM_MAX_MODEL_LEN=2048 \
     # 32 GB × 0.75 ≈ 24 GB on MI50: leaves headroom for KFD / amdgpu driver
     # overhead that vLLM's gpu-memory-utilization estimator ignores on gfx906.
-    VLLM_UTIL=0.55 \
+    VLLM_UTIL=0.4 \
     VLLM_MAX_NUM_SEQS=4 \
     VLLM_DTYPE=float16 \
     GPU=0

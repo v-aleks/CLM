@@ -15,7 +15,7 @@
 #   GPU                       - HIP device index visible inside the container (default: 0)
 #   VLLM_PORT                 - port for the vLLM /v1/embeddings server (default: 8090)
 #   VLLM_MAX_MODEL_LEN        - max sequence length for the encoder (default: 2048)
-#   VLLM_UTIL                 - gpu-memory-utilization for vLLM, 0..1 (default: 0.55)
+#   VLLM_UTIL                 - gpu-memory-utilization for vLLM, 0..1 (default: 0.4)
 #   VLLM_MAX_NUM_SEQS         - max concurrent sequences in vLLM (default: 4)
 #   VLLM_DTYPE                - encoder dtype; MUST be float16 on gfx906 (default: float16)
 #   VLLM_LOGGING_LEVEL        - log verbosity for vLLM (default: INFO; WARNING hides EngineCore errors)
@@ -47,7 +47,10 @@ set -euo pipefail
 # after `init_process_group` with no traceback and APIServer reports "Engine
 # core initialization failed". 0.55 is the highest value that worked on a
 # single MI50 in our tests.
-: "${VLLM_UTIL:=0.55}"
+: "${VLLM_UTIL:=0.4}"     # 32 GB × 0.4 = 12.8 GB; Qwen3-8B FP16 = 16 GB already fits inside.
+                                   # vLLM treats util as the KV-cache+activation budget,
+                                   # not the weight budget, so 0.4 leaves ~3 GB of slack
+                                   # for amdgpu / pyroc page tables on top of weights.
 : "${VLLM_MAX_NUM_SEQS:=4}"           # pool encoder is small; smaller batches ease KV-cache pressure
 : "${VLLM_DTYPE:=float16}"
 : "${VLLM_LOGGING_LEVEL:=INFO}"       # EngineCore FATAL/ERROR must surface; WARNING hides them

@@ -185,8 +185,8 @@ Open the playground in a browser: <http://localhost:8700/>.
 | `GPU` | `0` | HIP device index (`HIP_VISIBLE_DEVICES`) inside the container. |
 | `VLLM_PORT` | `8090` | Port the vLLM `/v1/embeddings` server listens on. |
 | `VLLM_MAX_MODEL_LEN` | `2048` | Encoder context length. Lower it to free GPU memory. |
-| `VLLM_UTIL` | `0.75` | `gpu-memory-utilization` for vLLM (0..1). The default is conservative for gfx906 because vLLM's allocator ignores KFD/amdgpu driver overhead. |
-| `VLLM_MAX_NUM_SEQS` | `8` | Concurrent sequences in vLLM. Pool encoders don't benefit from large batches. |
+| `VLLM_UTIL` | `0.4` | `gpu-memory-utilization` for vLLM (0..1). The default is conservative for gfx906 because vLLM's allocator ignores KFD/amdgpu driver overhead and EngineCore OOMs silently if `util × total` doesn't leave room for the 16 GB of Qwen3-8B FP16 weights plus ~3 GB of amdgpu slack. |
+| `VLLM_MAX_NUM_SEQS` | `4` | Concurrent sequences in vLLM. Pool encoders don't benefit from large batches. |
 | `VLLM_DTYPE` | `float16` | Encoder dtype. **Use `float16` on gfx906** — `bfloat16` is not native and falls back to `float32` (slow + 2× VRAM). |
 | `VLLM_LOGGING_LEVEL` | `INFO` | vLLM log verbosity. Use `WARNING` only after a successful first boot. |
 | `VLLM_EXTRA_ARGS` | *(empty)* | Extra flags appended to `vllm serve`, e.g. `--quantization awq_marlot`. |
@@ -206,16 +206,17 @@ Open the playground in a browser: <http://localhost:8700/>.
 
 The defaults assume a single MI50 32 GB. Qwen3-8B FP16 alone uses ~16 GB and
 vLLM's KV cache + activations eat the rest, so on a stock MI50 32 GB the arena
-cache is disabled by default (`CLM_ACTION_CACHE=0`). If vLLM OOMs at start-up,
-drop `VLLM_UTIL` further or shorten `VLLM_MAX_MODEL_LEN`:
+cache is disabled by default (`CLM_ACTION_CACHE=0`) and `VLLM_UTIL` is held at
+`0.4`. If vLLM OOMs at start-up, drop `VLLM_UTIL` further or shorten
+`VLLM_MAX_MODEL_LEN`:
 
 ```bash
 docker run --rm -d --name clm \
     --device=/dev/kfd --device=/dev/dri \
     --group-add video --group-add render --cap-add=SYS_ADMIN \
     --ipc=host -p 8700:8700 -p 8090:8090 \
-    -v clm-models:/models -v clm-logs:/logs \
-    -e VLLM_UTIL=0.65 -e VLLM_MAX_MODEL_LEN=1024 \
+    -v "$PWD/clm-logs:/logs" -v clm-models:/models \
+    -e VLLM_UTIL=0.3 -e VLLM_MAX_MODEL_LEN=1024 \
     clm-serve:latest
 ```
 
@@ -322,7 +323,7 @@ If `/dev/kfd` is missing, your host kernel doesn't have AMD's KFD module; see
 the [mobydick install guide][mobydick] for the kernel prerequisites.
 
 **`vllm.log` says `OutOfMemoryError: HIP out of memory.`** Same playbook as
-CUDA: lower `VLLM_UTIL` (the default on gfx906 is already 0.75; try `0.65`)
+CUDA: lower `VLLM_UTIL` (the default on gfx906 is already 0.4; try `0.3`)
 and/or `VLLM_MAX_MODEL_LEN` (e.g. `1024`). On a 32 GB MI50 the defaults
 already disable the projection-head cache (`CLM_ACTION_CACHE=0`).
 
@@ -333,8 +334,8 @@ mode. Run the same command with `docker logs clm -f` and look at lines from
 nothing between the `EngineCore` NIXL warnings and the abort, vLLM was killed
 by a SIGKILL from OOM-killer: check `dmesg | grep -i 'killed process'` on the
 host. Two reliable mitigations:
-- drop `VLLM_UTIL` to `0.6`,
-- drop `VLLM_MAX_NUM_SEQS` to `4`.
+- drop `VLLM_UTIL` to `0.3`,
+- drop `VLLM_MAX_NUM_SEQS` to `2`.
 
 **`vllm.log` says `RuntimeError: ... attention ... no kernel ... available`.**
 The flash-attention-gfx906 backend failed to register and vLLM has no
