@@ -1,0 +1,55 @@
+# Version control
+.git
+.gitignore
+.gitattributes
+
+# CI / GitHub
+.github
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+*.so
+.pytest_cache
+.mypy_cache
+.ruff_cache
+*.egg-info
+
+# Local virtualenvs and build artefacts
+.venv
+.venv-*
+venv
+venv-*
+env
+dist
+build
+
+# Checkpoints, embedding stores, model weights — never bake them into the image
+checkpoints/
+data/
+*.pt
+*.pth
+*.safetensors
+*.bin
+
+# Logs
+logs/
+*.log
+
+# T-Rex example local state (game assets, answer caches, etc.)
+examples/t_rex/data/
+examples/t_rex/cache/
+examples/t_rex/artifacts/
+
+# Editor / OS junk
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# The Dockerfile and .dockerignore themselves are not COPY'd into the image
+# automatically, but listing them here keeps the build context minimal.
+Dockerfile
+.dockerignore

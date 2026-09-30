@@ -177,7 +177,7 @@ def main() -> None:
     ap.add_argument("--ckpt-dir", default=None, help="also serve every *.pt in this directory under its file stem")
     ap.add_argument("--model", action="append", default=[], metavar="NAME=PATH", help="serve an extra checkpoint as NAME")
     ap.add_argument("--device", default=None,
-                    help="device for the heads (cpu or cuda; default: cuda when available, CLM_DEVICE overrides)")
+                    help="device for the heads: 'cpu', or 'cuda' (NVIDIA backend AND the AMD ROCm/HIP alias torch exposes on the vllm-gfx906-mobydick stack). Default: 'cuda' when a GPU is visible, CLM_DEVICE overrides.")
     ap.add_argument("--action-cache", default=None, metavar="BUDGET",
                     help="GPU memory reserved at start-up for reused state and action vectors: a fraction "
                          "of the device (0.02, the default) or a size (512MiB); 0 disables it. "

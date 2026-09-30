@@ -89,7 +89,19 @@ class VectorArena:
         self.device = torch.device(device)
         self.dtype = getattr(torch, dtype)
         if self.device.type == "cuda":
-            free, total = torch.cuda.mem_get_info(self.device)
+            # On AMD ROCm (vLLM-gfx906-mobydick) `torch.cuda` is the HIP API alias,
+            # and `mem_get_info` queries the KFD-reported free/total VRAM — that's
+            # exactly what we need to size the arena. If the runtime is somehow
+            # misconfigured (driver missing, /dev/kfd not mounted) fall back to a
+            # CPU arena instead of crashing here; the heads still work, just
+            # without the cached projections.
+            if torch.cuda.device_count() == 0:
+                print(f"[clm] VectorArena: no visible {self.device.type} devices, "
+                      "falling back to a CPU arena", flush=True)
+                self.device = torch.device("cpu")
+                free = total = 8 << 30
+            else:
+                free, total = torch.cuda.mem_get_info(self.device)
         else:  # a CPU arena is still bounded, it just cannot ask the driver for a budget
             free = total = 8 << 30
         want = parse_budget(budget, total)

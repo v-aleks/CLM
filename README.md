@@ -48,6 +48,42 @@ To install the latest from a clone:
 pip install -e .
 ```
 
+### Run in Docker (one container, GPU)
+
+For a self-contained deployment that launches both `vllm` (Qwen3-8B
+pooling encoder) and `clm-serve` inside a single image, see
+[`docker/README.md`](docker/README.md).
+
+**NVIDIA / CUDA host** (default image, `vllm/vllm-openai:latest`):
+```bash
+docker build -t clm-serve:latest .
+docker run --rm -d --name clm \
+    --gpus all --ipc=host \
+    -p 8700:8700 -p 8090:8090 \
+    -v clm-models:/models \
+    -v clm-logs:/logs \
+    clm-serve:latest
+# playground: http://localhost:8700/
+```
+
+**AMD Instinct MI50 / MI60 / Radeon VII (gfx906)** — uses the
+[`aiinfos/vllm-gfx906-mobydick`](https://github.com/v-aleks/vllm-gfx906-mobydick)
+fork of vLLM:
+```bash
+docker build \
+    --build-arg VLLM_IMAGE=aiinfos/vllm-gfx906-mobydick:latest \
+    -t clm-serve-rocm:latest .
+docker run --rm -d --name clm \
+    --device=/dev/kfd --device=/dev/dri \
+    --group-add video --group-add render \
+    --cap-add=SYS_ADMIN --ipc=host \
+    -p 8700:8700 -p 8090:8090 \
+    -v clm-models:/models \
+    -v clm-logs:/logs \
+    clm-serve-rocm:latest
+# playground: http://localhost:8700/
+```
+
 ---
 
 ## Quickstart
@@ -56,7 +92,11 @@ pip install -e .
 
 ```bash
 # 1. encoder (Qwen3-8B embeddings)
-vllm serve Qwen/Qwen3-8B --served-model-name qwen3-8b --runner pooling --max-model-len 2048 --port 8090 &
+#    On AMD gfx906 the dtype flag is REQUIRED — bfloat16 is not native there
+#    and would silently fall back to float32.
+vllm serve Qwen/Qwen3-8B \
+    --served-model-name qwen3-8b --runner pooling \
+    --dtype float16 --max-model-len 2048 --port 8090 &
 
 # 2. CLM API on :8700 (downloads the 75 MB reference head on first run)
 clm-serve

@@ -27,13 +27,26 @@ DEFAULT_CKPT_DIR = os.environ.get("CLM_CKPT_DIR", os.path.join(os.path.expanduse
 
 def default_device() -> str:
     """``CLM_DEVICE`` if set, else the GPU when torch sees one (the heads are tiny but the
-    projection then runs next to the encoder instead of copying embeddings back to host)."""
+    projection then runs next to the encoder instead of copying embeddings back to host).
+
+    Returns ``"cuda"`` on both NVIDIA (CUDA backend) and AMD ROCm (HIP backend,
+    exposed by torch ≥ 2.4 as the CUDA API alias). ``"cuda"`` is therefore the
+    right string to pass to ``torch.device(...)`` on an MI50/MI60/Radeon VII
+    running the vllm-gfx906-mobydick stack. Use ``CLM_DEVICE=cpu`` to force CPU.
+    """
     d = os.environ.get("CLM_DEVICE")
     if d:
         return d
     try:
         import torch
-        return "cuda" if torch.cuda.is_available() else "cpu"
+        if torch.cuda.is_available():
+            return "cuda"
+        # ROCm torch without the CUDA alias (very old builds, or a torch wheel
+        # compiled with HIP only). The mobydick fork ships torch ≥ 2.11 where
+        # `torch.cuda` is an alias for HIP and this branch never runs.
+        if getattr(torch, "version", None) is not None and getattr(torch.version, "hip", None):
+            return "cuda"
+        return "cpu"
     except ImportError:
         return "cpu"
 
