@@ -36,6 +36,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     # EngineCore initialization failures on gfx906 must be visible. WARNING
     # suppresses them; INFO is the right default for first-boot diagnostics.
     VLLM_LOGGING_LEVEL=INFO \
+    # NCCL/RCCL on gfx906 inside Docker without IB / GPU-direct — INFO shows
+    # which transport was chosen ("NET/Socket/0") so silent hangs are diagnosable.
+    NCCL_DEBUG=INFO \
     # gfx906 is reported as "gfx10.1" by the upstream ROCm 6.x runtime, which is
     # the magic value most ROCm-PyTorch and vLLM gfx906 forks expect. Override at
     # build/run time if your fork requires a different value.
@@ -122,8 +125,8 @@ ENV HF_HOME=/models/hf \
     VLLM_MAX_MODEL_LEN=2048 \
     # 32 GB × 0.75 ≈ 24 GB on MI50: leaves headroom for KFD / amdgpu driver
     # overhead that vLLM's gpu-memory-utilization estimator ignores on gfx906.
-    VLLM_UTIL=0.75 \
-    VLLM_MAX_NUM_SEQS=8 \
+    VLLM_UTIL=0.55 \
+    VLLM_MAX_NUM_SEQS=4 \
     VLLM_DTYPE=float16 \
     GPU=0
 

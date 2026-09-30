@@ -15,8 +15,8 @@
 #   GPU                       - HIP device index visible inside the container (default: 0)
 #   VLLM_PORT                 - port for the vLLM /v1/embeddings server (default: 8090)
 #   VLLM_MAX_MODEL_LEN        - max sequence length for the encoder (default: 2048)
-#   VLLM_UTIL                 - gpu-memory-utilization for vLLM, 0..1 (default: 0.75)
-#   VLLM_MAX_NUM_SEQS         - max concurrent sequences in vLLM (default: 8)
+#   VLLM_UTIL                 - gpu-memory-utilization for vLLM, 0..1 (default: 0.55)
+#   VLLM_MAX_NUM_SEQS         - max concurrent sequences in vLLM (default: 4)
 #   VLLM_DTYPE                - encoder dtype; MUST be float16 on gfx906 (default: float16)
 #   VLLM_LOGGING_LEVEL        - log verbosity for vLLM (default: INFO; WARNING hides EngineCore errors)
 #   VLLM_EXTRA_ARGS           - extra args appended to `vllm serve` (e.g. "--quantization awq_marlot")
@@ -29,7 +29,7 @@
 #   HSA_OVERRIDE_GFX_VERSION  - ROCm virtual GFX version (default: 10.1.0)
 #   PYTORCH_ROCM_ARCH         - ROCm arch list for torch (default: gfx906)
 #   FLASH_ATTENTION_TRITON_AMD_ENABLE - flash-attn-gfx906 toggle (default: TRUE)
-#   NCCL_DEBUG                - NCCL/RCCL log verbosity (default: WARN; INFO for diagnostics)
+#   NCCL_DEBUG                - NCCL/RCCL log verbosity (default: INFO; flip to WARN after a clean first boot)
 #   LOGDIR                    - directory for vLLM logs (default: /logs)
 #   HF_TOKEN                  - Hugging Face token for gated/private repos (optional)
 
@@ -38,8 +38,15 @@ set -euo pipefail
 : "${GPU:=0}"
 : "${VLLM_PORT:=8090}"
 : "${VLLM_MAX_MODEL_LEN:=2048}"
-: "${VLLM_UTIL:=0.75}"                # 32 GB × 0.75 ≈ 24 GB leaves room for KFD overhead on gfx906
-: "${VLLM_MAX_NUM_SEQS:=8}"           # pool encoder is small; smaller batches ease KV-cache pressure
+# The 32 GB MI50 is tight even for Qwen3-8B FP16 alone (16 GB weights).
+# vLLM's gpu-memory-utilization allocates a contiguous block up-front; if
+# it leaves less than ~6 GB for amdgpu / KFD page tables + PyTorch allocator
+# slack + the (independent) EngineCore subprocess, EngineCore dies silently
+# after `init_process_group` with no traceback and APIServer reports "Engine
+# core initialization failed". 0.55 is the highest value that worked on a
+# single MI50 in our tests.
+: "${VLLM_UTIL:=0.55}"
+: "${VLLM_MAX_NUM_SEQS:=4}"           # pool encoder is small; small batches ease KV-cache pressure
 : "${VLLM_DTYPE:=float16}"
 : "${VLLM_LOGGING_LEVEL:=INFO}"       # EngineCore FATAL/ERROR must surface; WARNING hides them
 : "${VLLM_EXTRA_ARGS:=}"
@@ -52,7 +59,7 @@ set -euo pipefail
 : "${HSA_OVERRIDE_GFX_VERSION:=10.1.0}"
 : "${PYTORCH_ROCM_ARCH:=gfx906}"
 : "${FLASH_ATTENTION_TRITON_AMD_ENABLE:=TRUE}"
-: "${NCCL_DEBUG:=WARN}"
+: "${NCCL_DEBUG:=INFO}"    # INFO shows which transport NCCL chose; flip to WARN after a clean first boot
 : "${LOGDIR:=/logs}"
 
 mkdir -p "$LOGDIR"
@@ -65,6 +72,13 @@ start_vllm() {
   echo "[entrypoint]   logging-level=${VLLM_LOGGING_LEVEL}"
   if [[ -n "${VLLM_EXTRA_ARGS}" ]]; then
     echo "[entrypoint]   extra args: ${VLLM_EXTRA_ARGS}"
+  fi
+
+  # Surface the host's free VRAM so a silent OOM on gfx906 is easy to spot.
+  if command -v rocm-smi >/dev/null 2>&1; then
+    echo "[entrypoint] --- rocm-smi ---"
+    rocm-smi --showproductname --showmeminfo vram 2>&1 | head -20 || true
+    echo "[entrypoint] ---------------"
   fi
 
   # gfx906 does not implement bf16 — if VLLM_DTYPE is left at bf16 vLLM will silently
@@ -96,7 +110,7 @@ start_vllm() {
   NCCL_IB_DISABLE=1 \
   NCCL_P2P_DISABLE=1 \
   NCCL_NET_GDR_LEVEL=0 \
-  NCCL_DEBUG="${NCCL_DEBUG:-WARN}" \
+  NCCL_DEBUG="${NCCL_DEBUG:-INFO}" \
   VLLM_LOGGING_LEVEL="${VLLM_LOGGING_LEVEL}" \
   vllm serve Qwen/Qwen3-8B \
       --served-model-name qwen3-8b \

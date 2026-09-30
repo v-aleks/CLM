@@ -12,9 +12,9 @@
 set -u
 GPU="${GPU:-0}"
 PORT="${PORT:-8090}"
-UTIL="${UTIL:-0.65}"                 # conservative on gfx906; KFD overhead is real
+UTIL="${UTIL:-0.55}"                 # 32 GB MI50; tighter than 0.85 to leave room for amdgpu overhead
 MAXLEN="${MAXLEN:-2048}"
-SEQ="${SEQ:-8}"                      # pooling-mode encoder; small batches are fine
+SEQ="${SEQ:-4}"                      # pooling-mode encoder; small batches are fine
 DTYPE="${DTYPE:-float16}"            # gfx906 has no native bf16 — keep fp16
 HSA_OVERRIDE_GFX_VERSION="${HSA_OVERRIDE_GFX_VERSION:-10.1.0}"
 PYTORCH_ROCM_ARCH="${PYTORCH_ROCM_ARCH:-gfx906}"
@@ -31,7 +31,7 @@ NCCL_SOCKET_IFNAME=lo \
 NCCL_IB_DISABLE=1 \
 NCCL_P2P_DISABLE=1 \
 NCCL_NET_GDR_LEVEL=0 \
-NCCL_DEBUG="${NCCL_DEBUG:-WARN}" \
+NCCL_DEBUG="${NCCL_DEBUG:-INFO}" \
 VLLM_LOGGING_LEVEL="${VLLM_LOGGING_LEVEL:-INFO}" \
 exec vllm serve Qwen/Qwen3-8B \
     --served-model-name qwen3-8b \
