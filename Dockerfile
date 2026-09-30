@@ -45,6 +45,14 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     # wrapper silently no-ops without this flag, which then crashes vLLM with
     # "no attention backend available" on long contexts.
     FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE \
+    # vLLM v1 always runs `torch.distributed.init_process_group(backend='nccl')`
+    # even for single-GPU. RCCL on gfx906 + Docker's default netns doesn't
+    # rendezvous unless we force loopback TCP and disable IB / GPU-direct P2P.
+    NCCL_SOCKET_IFNAME=lo \
+    NCCL_IB_DISABLE=1 \
+    NCCL_P2P_DISABLE=1 \
+    NCCL_NET_GDR_LEVEL=0 \
+    TORCH_NCCL_ASYNC_ERROR_HANDLING=1 \
     # Defuse NVIDIA/CUDA discovery inside the ROCm container — harmless on
     # AMD-only hosts, but stops accidental nvidia-container-toolkit lookups
     # when both runtimes are present (e.g. dual-socket dev boxes).

@@ -29,6 +29,7 @@
 #   HSA_OVERRIDE_GFX_VERSION  - ROCm virtual GFX version (default: 10.1.0)
 #   PYTORCH_ROCM_ARCH         - ROCm arch list for torch (default: gfx906)
 #   FLASH_ATTENTION_TRITON_AMD_ENABLE - flash-attn-gfx906 toggle (default: TRUE)
+#   NCCL_DEBUG                - NCCL/RCCL log verbosity (default: WARN; INFO for diagnostics)
 #   LOGDIR                    - directory for vLLM logs (default: /logs)
 #   HF_TOKEN                  - Hugging Face token for gated/private repos (optional)
 
@@ -51,6 +52,7 @@ set -euo pipefail
 : "${HSA_OVERRIDE_GFX_VERSION:=10.1.0}"
 : "${PYTORCH_ROCM_ARCH:=gfx906}"
 : "${FLASH_ATTENTION_TRITON_AMD_ENABLE:=TRUE}"
+: "${NCCL_DEBUG:=WARN}"
 : "${LOGDIR:=/logs}"
 
 mkdir -p "$LOGDIR"
@@ -77,12 +79,24 @@ start_vllm() {
   # scratch buffer that's easy to OOM on a single MI50. Re-enable locally if
   # you have headroom via VLLM_EXTRA_ARGS.
   #
+  # vLLM v1 always runs `torch.distributed.init_process_group(backend='nccl')`
+  # even for single-GPU — RCCL on gfx906 ships with the mobydick image but the
+  # defaults try InfiniBand / GPU-direct P2P that don't exist inside Docker,
+  # so the rendezvous hangs and EngineCore never replies. The four NCCL_*
+  # vars below force a pure TCP/loopback handshake, which works on a single
+  # MI50 in a single container. (Multi-GPU rigs will need different settings.)
+  #
   # shellcheck disable=SC2086
   HIP_VISIBLE_DEVICES="${GPU}" \
   HSA_OVERRIDE_GFX_VERSION="${HSA_OVERRIDE_GFX_VERSION}" \
   PYTORCH_ROCM_ARCH="${PYTORCH_ROCM_ARCH}" \
   FLASH_ATTENTION_TRITON_AMD_ENABLE="${FLASH_ATTENTION_TRITON_AMD_ENABLE}" \
   TORCH_NCCL_ASYNC_ERROR_HANDLING=1 \
+  NCCL_SOCKET_IFNAME=lo \
+  NCCL_IB_DISABLE=1 \
+  NCCL_P2P_DISABLE=1 \
+  NCCL_NET_GDR_LEVEL=0 \
+  NCCL_DEBUG="${NCCL_DEBUG:-WARN}" \
   VLLM_LOGGING_LEVEL="${VLLM_LOGGING_LEVEL}" \
   vllm serve Qwen/Qwen3-8B \
       --served-model-name qwen3-8b \
