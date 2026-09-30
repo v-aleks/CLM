@@ -15,9 +15,10 @@
 #   GPU                       - HIP device index visible inside the container (default: 0)
 #   VLLM_PORT                 - port for the vLLM /v1/embeddings server (default: 8090)
 #   VLLM_MAX_MODEL_LEN        - max sequence length for the encoder (default: 2048)
-#   VLLM_UTIL                 - gpu-memory-utilization for vLLM, 0..1 (default: 0.85)
-#   VLLM_MAX_NUM_SEQS         - max concurrent sequences in vLLM (default: 32)
+#   VLLM_UTIL                 - gpu-memory-utilization for vLLM, 0..1 (default: 0.75)
+#   VLLM_MAX_NUM_SEQS         - max concurrent sequences in vLLM (default: 8)
 #   VLLM_DTYPE                - encoder dtype; MUST be float16 on gfx906 (default: float16)
+#   VLLM_LOGGING_LEVEL        - log verbosity for vLLM (default: INFO; WARNING hides EngineCore errors)
 #   VLLM_EXTRA_ARGS           - extra args appended to `vllm serve` (e.g. "--quantization awq_marlot")
 #   SKIP_VLLM                 - if "1", skip starting vLLM (use an external embedder)
 #   CLM_PORT                  - port for the FastAPI server (default: 8700)
@@ -36,9 +37,10 @@ set -euo pipefail
 : "${GPU:=0}"
 : "${VLLM_PORT:=8090}"
 : "${VLLM_MAX_MODEL_LEN:=2048}"
-: "${VLLM_UTIL:=0.85}"
-: "${VLLM_MAX_NUM_SEQS:=32}"
+: "${VLLM_UTIL:=0.75}"                # 32 GB × 0.75 ≈ 24 GB leaves room for KFD overhead on gfx906
+: "${VLLM_MAX_NUM_SEQS:=8}"           # pool encoder is small; smaller batches ease KV-cache pressure
 : "${VLLM_DTYPE:=float16}"
+: "${VLLM_LOGGING_LEVEL:=INFO}"       # EngineCore FATAL/ERROR must surface; WARNING hides them
 : "${VLLM_EXTRA_ARGS:=}"
 : "${SKIP_VLLM:=0}"
 : "${CLM_PORT:=8700}"
@@ -58,6 +60,7 @@ echo "[entrypoint] ROCm gfx=${HSA_OVERRIDE_GFX_VERSION}  PYTORCH_ROCM_ARCH=${PYT
 start_vllm() {
   echo "[entrypoint] starting vLLM Qwen3-8B on HIP device ${GPU}, port ${VLLM_PORT}"
   echo "[entrypoint]   max-model-len=${VLLM_MAX_MODEL_LEN}  gpu-mem-util=${VLLM_UTIL}  max-num-seqs=${VLLM_MAX_NUM_SEQS}  dtype=${VLLM_DTYPE}"
+  echo "[entrypoint]   logging-level=${VLLM_LOGGING_LEVEL}"
   if [[ -n "${VLLM_EXTRA_ARGS}" ]]; then
     echo "[entrypoint]   extra args: ${VLLM_EXTRA_ARGS}"
   fi
@@ -69,17 +72,22 @@ start_vllm() {
     VLLM_DTYPE="float16"
   fi
 
+  # We deliberately do NOT pass --enable-prefix-caching: pooling-mode encoders cache
+  # last-token outputs and the prefix-cache manager allocates a sizeable
+  # scratch buffer that's easy to OOM on a single MI50. Re-enable locally if
+  # you have headroom via VLLM_EXTRA_ARGS.
+  #
   # shellcheck disable=SC2086
   HIP_VISIBLE_DEVICES="${GPU}" \
   HSA_OVERRIDE_GFX_VERSION="${HSA_OVERRIDE_GFX_VERSION}" \
   PYTORCH_ROCM_ARCH="${PYTORCH_ROCM_ARCH}" \
   FLASH_ATTENTION_TRITON_AMD_ENABLE="${FLASH_ATTENTION_TRITON_AMD_ENABLE}" \
   TORCH_NCCL_ASYNC_ERROR_HANDLING=1 \
+  VLLM_LOGGING_LEVEL="${VLLM_LOGGING_LEVEL}" \
   vllm serve Qwen/Qwen3-8B \
       --served-model-name qwen3-8b \
       --runner pooling \
       --enforce-eager \
-      --enable-prefix-caching \
       --dtype "${VLLM_DTYPE}" \
       --max-model-len "${VLLM_MAX_MODEL_LEN}" \
       --gpu-memory-utilization "${VLLM_UTIL}" \
@@ -89,19 +97,18 @@ start_vllm() {
       >> "${LOGDIR}/vllm.log" 2>&1 &
 
   VLLM_PID=$!
-  echo "[entrypoint] vLLM PID=${VLLM_PID}; logs -> ${LOGDIR}/vllm.log"
+  echo "[entrypoint] vLLM PID=${VLLM_PID}; logs -> ${LOGDIR}/vllm.log}"
   trap 'echo "[entrypoint] stopping vLLM (PID=${VLLM_PID})"; kill "${VLLM_PID}" 2>/dev/null || true; wait "${VLLM_PID}" 2>/dev/null || true' EXIT
 
   echo "[entrypoint] waiting for vLLM at http://127.0.0.1:${VLLM_PORT}/v1/models ..."
   # gfx906 cold-load is slow: 16 GB of Qwen3-8B FP16 weights + kv-cache alloc +
   # rope/fused-kernel JIT can easily take 8–15 minutes on a single MI50. Allow
-  # 20 minutes and dump a richer tail (last 800 lines) on abort so the root
-  # cause is visible — the previous "tail -200" hid the real traceback.
-  if ! /usr/local/bin/wait_for_url.sh "http://127.0.0.1:${VLLM_PORT}/v1/models" 1200 5; then
-    echo "[entrypoint] vLLM failed to become ready in 1200s; tail of log:" >&2
-    echo "[entrypoint] ---------------- vllm.log (last 800 lines) ----------------" >&2
-    tail -800 "${LOGDIR}/vllm.log" >&2 || true
-    echo "[entryentry] -----------------------------------------------------" >&2
+  # 25 minutes and dump a richer tail on abort so the root cause is visible.
+  if ! /usr/local/bin/wait_for_url.sh "http://127.0.0.1:${VLLM_PORT}/v1/models" 1500 5; then
+    echo "[entrypoint] vLLM failed to become ready in 1500s; tail of log:" >&2
+    echo "[entrypoint] ---------------- vllm.log (last 1000 lines) ----------------" >&2
+    tail -1000 "${LOGDIR}/vllm.log" >&2 || true
+    echo "[entryentry] --------------------------------------------------------" >&2
     exit 1
   fi
   echo "[entrypoint] vLLM is up"

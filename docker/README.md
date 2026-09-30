@@ -171,9 +171,10 @@ Open the playground in a browser: <http://localhost:8700/>.
 | `GPU` | `0` | HIP device index (`HIP_VISIBLE_DEVICES`) inside the container. |
 | `VLLM_PORT` | `8090` | Port the vLLM `/v1/embeddings` server listens on. |
 | `VLLM_MAX_MODEL_LEN` | `2048` | Encoder context length. Lower it to free GPU memory. |
-| `VLLM_UTIL` | `0.85` | `gpu-memory-utilization` for vLLM (0..1). |
-| `VLLM_MAX_NUM_SEQS` | `32` | Concurrent sequences in vLLM. |
+| `VLLM_UTIL` | `0.75` | `gpu-memory-utilization` for vLLM (0..1). The default is conservative for gfx906 because vLLM's allocator ignores KFD/amdgpu driver overhead. |
+| `VLLM_MAX_NUM_SEQS` | `8` | Concurrent sequences in vLLM. Pool encoders don't benefit from large batches. |
 | `VLLM_DTYPE` | `float16` | Encoder dtype. **Use `float16` on gfx906** — `bfloat16` is not native and falls back to `float32` (slow + 2× VRAM). |
+| `VLLM_LOGGING_LEVEL` | `INFO` | vLLM log verbosity. Use `WARNING` only after a successful first boot. |
 | `VLLM_EXTRA_ARGS` | *(empty)* | Extra flags appended to `vllm serve`, e.g. `--quantization awq_marlot`. |
 | `SKIP_VLLM` | `0` | Set to `1` to start `clm-serve` against an external embedder (see below). |
 | `CLM_PORT` | `8700` | Port for `clm-serve`. |
@@ -187,12 +188,12 @@ Open the playground in a browser: <http://localhost:8700/>.
 | `HF_TOKEN` | *(empty)* | Hugging Face token for private/gated repos. Qwen3-8B is public, so this is rarely needed. |
 | `LOGDIR` | `/logs` | Where `vllm.log` and uvicorn logs are written. |
 
-### Example: lower memory on a 32 GB MI50
+### Example: tune memory on a 32 GB MI50
 
-The defaults assume ~32 GB VRAM. Qwen3-8B FP16 alone uses ~16 GB and vLLM's
-KV cache + activations eat the rest, so on a stock MI50 32 GB the arena cache
-is disabled by default (`CLM_ACTION_CACHE=0`). If vLLM OOMs at start-up, drop
-`VLLM_UTIL` to `0.78` or shorten `VLLM_MAX_MODEL_LEN` to `1024`:
+The defaults assume a single MI50 32 GB. Qwen3-8B FP16 alone uses ~16 GB and
+vLLM's KV cache + activations eat the rest, so on a stock MI50 32 GB the arena
+cache is disabled by default (`CLM_ACTION_CACHE=0`). If vLLM OOMs at start-up,
+drop `VLLM_UTIL` further or shorten `VLLM_MAX_MODEL_LEN`:
 
 ```bash
 docker run --rm -d --name clm \
@@ -200,7 +201,7 @@ docker run --rm -d --name clm \
     --group-add video --group-add render --cap-add=SYS_ADMIN \
     --ipc=host -p 8700:8700 -p 8090:8090 \
     -v clm-models:/models -v clm-logs:/logs \
-    -e VLLM_UTIL=0.78 -e VLLM_MAX_MODEL_LEN=1024 \
+    -e VLLM_UTIL=0.65 -e VLLM_MAX_MODEL_LEN=1024 \
     clm-serve:latest
 ```
 
@@ -281,9 +282,24 @@ If `/dev/kfd` is missing, your host kernel doesn't have AMD's KFD module; see
 the [mobydick install guide][mobydick] for the kernel prerequisites.
 
 **`vllm.log` says `OutOfMemoryError: HIP out of memory.`** Same playbook as
-CUDA: lower `VLLM_UTIL` (e.g. `0.78`) and/or `VLLM_MAX_MODEL_LEN`
-(e.g. `1024`). On a 32 GB MI50 the defaults already disable the
-projection-head cache (`CLM_ACTION_CACHE=0`).
+CUDA: lower `VLLM_UTIL` (the default on gfx906 is already 0.75; try `0.65`)
+and/or `VLLM_MAX_MODEL_LEN` (e.g. `1024`). On a 32 GB MI50 the defaults
+already disable the projection-head cache (`CLM_ACTION_CACHE=0`).
+
+**`vllm.log` hangs for 10+ minutes then aborts with `Engine core initialization
+failed. See root cause above.`** — the most common gfx906-specific failure
+mode. Run the same command with `docker logs clm -f` and look at lines from
+`EngineCore pid=...` (they appear in the parent process's stdout). If you see
+nothing between the `EngineCore` NIXL warnings and the abort, vLLM was killed
+by a SIGKILL from OOM-killer: check `dmesg | grep -i 'killed process'` on the
+host. Two reliable mitigations:
+- drop `VLLM_UTIL` to `0.6`,
+- drop `VLLM_MAX_NUM_SEQS` to `4`.
+
+**`vllm.log` says `RuntimeError: ... attention ... no kernel ... available`.**
+The flash-attention-gfx906 backend failed to register and vLLM has no
+fallback. Set `FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE` (the default already
+does this; only happens if you override it in your `docker run` command).
 
 **`vllm.log` says `RuntimeError: no kernel image is available for execution
 on the device` / `gfx906`.** Your build was compiled for a different GFX
@@ -300,7 +316,8 @@ slow. `entrypoint.sh` warns and falls back to float16 if you set
 **`vllm.log` says `no flash attention backend is available`.** You forgot
 `FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE`. The Dockerfile and `entrypoint.sh`
 set this by default; only happens if you override it in your `docker run`
-command.
+command. (See the previous entry for the more common "Engine core
+initialization failed" variant of this same root cause.)
 
 **The container is stuck in `starting` for > 10 minutes.** Qwen3-8B is being
 downloaded. Watch progress:

@@ -33,7 +33,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     HF_HUB_ENABLE_HF_TRANSFER=0 \
     DO_NOT_TRACK=1 \
-    VLLM_LOGGING_LEVEL=WARNING \
+    # EngineCore initialization failures on gfx906 must be visible. WARNING
+    # suppresses them; INFO is the right default for first-boot diagnostics.
+    VLLM_LOGGING_LEVEL=INFO \
     # gfx906 is reported as "gfx10.1" by the upstream ROCm 6.x runtime, which is
     # the magic value most ROCm-PyTorch and vLLM gfx906 forks expect. Override at
     # build/run time if your fork requires a different value.
@@ -110,8 +112,10 @@ ENV HF_HOME=/models/hf \
     CLM_ACTION_CACHE=0 \
     VLLM_PORT=8090 \
     VLLM_MAX_MODEL_LEN=2048 \
-    VLLM_UTIL=0.85 \
-    VLLM_MAX_NUM_SEQS=32 \
+    # 32 GB × 0.75 ≈ 24 GB on MI50: leaves headroom for KFD / amdgpu driver
+    # overhead that vLLM's gpu-memory-utilization estimator ignores on gfx906.
+    VLLM_UTIL=0.75 \
+    VLLM_MAX_NUM_SEQS=8 \
     VLLM_DTYPE=float16 \
     GPU=0
 
