@@ -19,6 +19,8 @@
 #   VLLM_MAX_NUM_SEQS         - max concurrent sequences in vLLM (default: 4)
 #   VLLM_DTYPE                - encoder dtype; MUST be float16 on gfx906 (default: float16)
 #   VLLM_LOGGING_LEVEL        - log verbosity for vLLM (default: DEBUG; INFO hides EngineCore errors)
+#   VLLM_USE_V1               - 0 = legacy single-process engine (avoids EngineCore segfault on gfx906),
+#                               1 = opt back into v1 (default: 0).
 #   VLLM_EXTRA_ARGS           - extra args appended to `vllm serve` (e.g. "--quantization awq_marlot")
 #   SKIP_VLLM                 - if "1", skip starting vLLM (use an external embedder)
 #   CLM_PORT                  - port for the FastAPI server (default: 8700)
@@ -54,6 +56,11 @@ set -euo pipefail
 : "${VLLM_MAX_NUM_SEQS:=4}"           # pool encoder is small; smaller batches ease KV-cache pressure
 : "${VLLM_DTYPE:=float16}"
 : "${VLLM_LOGGING_LEVEL:=DEBUG}"      # DEBUG until we know gfx906 boots; flip to INFO once stable
+# vLLM v1 ships an EngineCore subprocess that segfaults on gfx906 in
+# libamdhip64.so 7.2.x (see mobydick issue tracker). v0 (legacy) uses a single
+# process and avoids that crash. Set to 1 to opt back into v1 once an image
+# with the fix is published.
+: "${VLLM_USE_V1:=0}"
 : "${VLLM_EXTRA_ARGS:=}"
 : "${SKIP_VLLM:=0}"
 : "${CLM_PORT:=8700}"
@@ -138,6 +145,7 @@ start_vllm() {
   NCCL_NET_GDR_LEVEL=0 \
   NCCL_DEBUG="${NCCL_DEBUG:-INFO}" \
   VLLM_LOGGING_LEVEL="${VLLM_LOGGING_LEVEL}" \
+  VLLM_USE_V1="${VLLM_USE_V1}" \
   python -u -m vllm.entrypoints.openai.api_server \
       --model Qwen/Qwen3-8B \
       --served-model-name qwen3-8b \

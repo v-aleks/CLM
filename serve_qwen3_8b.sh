@@ -33,6 +33,7 @@ NCCL_P2P_DISABLE=1 \
 NCCL_NET_GDR_LEVEL=0 \
 NCCL_DEBUG="${NCCL_DEBUG:-INFO}" \
 VLLM_LOGGING_LEVEL="${VLLM_LOGGING_LEVEL:-INFO}" \
+VLLM_USE_V1="${VLLM_USE_V1:-0}" \
 exec vllm serve Qwen/Qwen3-8B \
     --served-model-name qwen3-8b \
     --runner pooling \
