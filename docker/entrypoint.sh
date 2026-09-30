@@ -74,6 +74,7 @@ start_vllm() {
   HSA_OVERRIDE_GFX_VERSION="${HSA_OVERRIDE_GFX_VERSION}" \
   PYTORCH_ROCM_ARCH="${PYTORCH_ROCM_ARCH}" \
   FLASH_ATTENTION_TRITON_AMD_ENABLE="${FLASH_ATTENTION_TRITON_AMD_ENABLE}" \
+  TORCH_NCCL_ASYNC_ERROR_HANDLING=1 \
   vllm serve Qwen/Qwen3-8B \
       --served-model-name qwen3-8b \
       --runner pooling \
@@ -92,9 +93,15 @@ start_vllm() {
   trap 'echo "[entrypoint] stopping vLLM (PID=${VLLM_PID})"; kill "${VLLM_PID}" 2>/dev/null || true; wait "${VLLM_PID}" 2>/dev/null || true' EXIT
 
   echo "[entrypoint] waiting for vLLM at http://127.0.0.1:${VLLM_PORT}/v1/models ..."
-  if ! /usr/local/bin/wait_for_url.sh "http://127.0.0.1:${VLLM_PORT}/v1/models" 600 5; then
-    echo "[entrypoint] vLLM failed to become ready in 600s; tail of log:" >&2
-    tail -200 "${LOGDIR}/vllm.log" >&2 || true
+  # gfx906 cold-load is slow: 16 GB of Qwen3-8B FP16 weights + kv-cache alloc +
+  # rope/fused-kernel JIT can easily take 8–15 minutes on a single MI50. Allow
+  # 20 minutes and dump a richer tail (last 800 lines) on abort so the root
+  # cause is visible — the previous "tail -200" hid the real traceback.
+  if ! /usr/local/bin/wait_for_url.sh "http://127.0.0.1:${VLLM_PORT}/v1/models" 1200 5; then
+    echo "[entrypoint] vLLM failed to become ready in 1200s; tail of log:" >&2
+    echo "[entrypoint] ---------------- vllm.log (last 800 lines) ----------------" >&2
+    tail -800 "${LOGDIR}/vllm.log" >&2 || true
+    echo "[entryentry] -----------------------------------------------------" >&2
     exit 1
   fi
   echo "[entrypoint] vLLM is up"
