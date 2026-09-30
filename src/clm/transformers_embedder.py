@@ -35,6 +35,7 @@ import threading
 from typing import Any
 
 import numpy as np
+import torch
 
 logger = logging.getLogger("clm.transformers_embedder")
 logging.basicConfig(
@@ -43,14 +44,13 @@ logging.basicConfig(
 )
 
 
-def last_token_pool(last_hidden_states: "torch.Tensor", attention_mask: "torch.Tensor") -> "torch.Tensor":
+def last_token_pool(last_hidden_states: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
     """Last non-padded token per row, exactly as Qwen2/3 recommend in their
     HF model card. Equivalent to vLLM's ``seq_pooling_type='LAST'``.
 
     ``last_hidden_states`` shape: [batch, seq, hidden].
     Returns: [batch, hidden].
     """
-    import torch
     left_padding = (attention_mask[:, -1].sum() == attention_mask.shape[0])
     if left_padding:
         return last_hidden_states[:, -1]
@@ -66,7 +66,6 @@ class _Embedder:
     """Singleton model holder. Loads once, reuses across requests."""
 
     def __init__(self, model_name: str, device: str, dtype: str, max_length: int):
-        import torch
         from transformers import AutoModel, AutoTokenizer
 
         torch_dtype = {"float16": torch.float16, "fp16": torch.float16,
@@ -91,7 +90,6 @@ class _Embedder:
 
     @torch.inference_mode()
     def embed(self, texts: list[str]) -> tuple[np.ndarray, int]:
-        import torch
         enc = self.tokenizer(
             texts,
             padding=True,
@@ -201,11 +199,7 @@ def main() -> None:
     args = ap.parse_args()
 
     if args.device is None:
-        try:
-            import torch
-            args.device = "cuda" if torch.cuda.is_available() else "cpu"
-        except ImportError:
-            args.device = "cpu"
+        args.device = "cuda" if torch.cuda.is_available() else "cpu"
 
     _AppState.model_name = args.model
     _AppState.device = args.device
