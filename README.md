@@ -57,13 +57,15 @@ pooling encoder) and `clm-serve` inside a single image, see
 **NVIDIA / CUDA host** (default image, `vllm/vllm-openai:latest`):
 ```bash
 docker build -t clm-serve:latest .
+mkdir -p "$PWD/clm-logs"
 docker run --rm -d --name clm \
     --gpus all --ipc=host \
     -p 8700:8700 -p 8090:8090 \
     -v clm-models:/models \
-    -v clm-logs:/logs \
+    -v "$PWD/clm-logs:/logs" \
     clm-serve:latest
 # playground: http://localhost:8700/
+# logs:     $PWD/clm-logs/vllm.log  (survives `--rm`; tail -F it from another shell)
 ```
 
 **AMD Instinct MI50 / MI60 / Radeon VII (gfx906)** — uses the
@@ -73,15 +75,17 @@ fork of vLLM:
 docker build \
     --build-arg VLLM_IMAGE=aiinfos/vllm-gfx906-mobydick:latest \
     -t clm-serve-rocm:latest .
+mkdir -p "$PWD/clm-logs"
 docker run --rm -d --name clm \
     --device=/dev/kfd --device=/dev/dri \
     --group-add video --group-add render \
     --cap-add=SYS_ADMIN --ipc=host \
     -p 8700:8700 -p 8090:8090 \
     -v clm-models:/models \
-    -v clm-logs:/logs \
+    -v "$PWD/clm-logs:/logs" \
     clm-serve-rocm:latest
 # playground: http://localhost:8700/
+# logs:     $PWD/clm-logs/vllm.log  (survives `--rm`; tail -F it from another shell)
 ```
 
 ---

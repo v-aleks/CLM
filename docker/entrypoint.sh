@@ -48,7 +48,7 @@ set -euo pipefail
 # core initialization failed". 0.55 is the highest value that worked on a
 # single MI50 in our tests.
 : "${VLLM_UTIL:=0.55}"
-: "${VLLM_MAX_NUM_SEQS:=4}"           # pool encoder is small; small batches ease KV-cache pressure
+: "${VLLM_MAX_NUM_SEQS:=4}"           # pool encoder is small; smaller batches ease KV-cache pressure
 : "${VLLM_DTYPE:=float16}"
 : "${VLLM_LOGGING_LEVEL:=INFO}"       # EngineCore FATAL/ERROR must surface; WARNING hides them
 : "${VLLM_EXTRA_ARGS:=}"
@@ -107,11 +107,27 @@ start_vllm() {
   # vars below force a pure TCP/loopback handshake, which works on a single
   # MI50 in a single container. (Multi-GPU rigs will need different settings.)
   #
+  # HIP_LAUNCH_BLOCKING=1 makes HIP errors synchronous (kills the process with
+  # a stack trace) instead of silently queuing work that later crashes inside
+  # EngineCore — essential when gfx906 OOMs on the model load.
+  #
+  # TORCH_DISTRIBUTED_DEBUG=DETAIL forces torch.distributed to print what
+  # every rank is doing, which is the only way to see why the single-rank
+  # EngineCore is silent after init_process_group.
+  #
+  # We launch through `python -u -m vllm.entrypoints.openai.api_server` rather
+  # than the `vllm` console script. This way the EngineCore subprocess inherits
+  # the same stdout/stderr fds via multiprocessing.spawn's fd inheritance, and
+  # any silent OOM tracebacks actually land in our vllm.log instead of being
+  # swallowed by the wrapper script.
+  #
   # shellcheck disable=SC2086
   HIP_VISIBLE_DEVICES="${GPU}" \
   HSA_OVERRIDE_GFX_VERSION="${HSA_OVERRIDE_GFX_VERSION}" \
   PYTORCH_ROCM_ARCH="${PYTORCH_ROCM_ARCH}" \
   FLASH_ATTENTION_TRITON_AMD_ENABLE="${FLASH_ATTENTION_TRITON_AMD_ENABLE}" \
+  HIP_LAUNCH_BLOCKING=1 \
+  TORCH_DISTRIBUTED_DEBUG=DETAIL \
   TORCH_NCCL_ASYNC_ERROR_HANDLING=1 \
   NCCL_SOCKET_IFNAME=lo \
   NCCL_IB_DISABLE=1 \
@@ -119,7 +135,8 @@ start_vllm() {
   NCCL_NET_GDR_LEVEL=0 \
   NCCL_DEBUG="${NCCL_DEBUG:-INFO}" \
   VLLM_LOGGING_LEVEL="${VLLM_LOGGING_LEVEL}" \
-  vllm serve Qwen/Qwen3-8B \
+  python -u -m vllm.entrypoints.openai.api_server \
+      --model Qwen/Qwen3-8B \
       --served-model-name qwen3-8b \
       --runner pooling \
       --enforce-eager \
@@ -130,9 +147,9 @@ start_vllm() {
       --port "${VLLM_PORT}" \
       ${VLLM_EXTRA_ARGS} \
       >> "${LOGDIR}/vllm.log" 2>&1 &
-
   VLLM_PID=$!
-  echo "[entrypoint] vLLM PID=${VLLM_PID}; logs -> ${LOGDIR}/vllm.log}"
+
+  echo "[entrypoint] vLLM PID=${VLLM_PID}; logs -> ${LOGDIR}/vllm.log"
   trap 'echo "[entrypoint] stopping vLLM (PID=${VLLM_PID})"; kill "${VLLM_PID}" 2>/dev/null || true; wait "${VLLM_PID}" 2>/dev/null || true' EXIT
 
   echo "[entrypoint] waiting for vLLM at http://127.0.0.1:${VLLM_PORT}/v1/models (timeout=${VLLM_READY_TIMEOUT}s) ..."

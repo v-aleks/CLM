@@ -78,7 +78,15 @@ The two heavy artefacts — **Qwen3-8B** (~16 GB FP16, cached under
 restarts. The first start downloads Qwen3-8B and may take 5–15 minutes;
 later starts are ~30 s.
 
+For **debugging** gfx906 boot failures, mount `/logs` as a bind-mount on the
+host (not a named volume) so `vllm.log` and uvicorn output survive container
+crashes and can be read after the fact with `tail`, `less`, your editor, or
+a one-liner copy command. A named volume like `clm-logs:/logs` is convenient
+for day-to-day use but requires a temporary alpine container to inspect:
+
 ```bash
+# Recommended for gfx906 debugging — logs land on the host.
+mkdir -p "$PWD/clm-logs"
 docker run --rm -d --name clm \
     --device=/dev/kfd \
     --device=/dev/dri \
@@ -88,9 +96,12 @@ docker run --rm -d --name clm \
     --ipc=host \
     -p 8700:8700 \
     -p 8090:8090 \
+    -v "$PWD/clm-logs:/logs" \
     -v clm-models:/models \
-    -v clm-logs:/logs \
     clm-serve:latest
+# then on the host, in another shell:
+tail -F "$PWD/clm-logs/vllm.log"
+ls -la "$PWD/clm-logs/"
 ```
 
 * `--device=/dev/kfd --device=/dev/dri --group-add video --group-add render
@@ -102,6 +113,8 @@ docker run --rm -d --name clm \
 * `-p 8700:8700` — the CLM API + playground.
 * `-p 8090:8090` — direct access to the vLLM `/v1/embeddings` endpoint
   (optional; useful for debugging or for clients that bypass `clm-serve`).
+* `-v "$PWD/clm-logs:/logs"` — bind-mount so logs survive a container crash.
+  Drop this and use `-v clm-logs:/logs` (a named volume) once boot is stable.
 
 To pin a specific GPU when the host has more than one:
 
@@ -111,7 +124,8 @@ docker run --rm -d --name clm \
     --group-add video --group-add render --cap-add=SYS_ADMIN \
     --ipc=host \
     -p 8700:8700 -p 8090:8090 \
-    -v clm-models:/models -v clm-logs:/logs \
+    -v "$PWD/clm-logs:/logs" \
+    -v clm-models:/models \
     -e GPU=0 \
     clm-serve:latest
 ```
@@ -261,6 +275,32 @@ since Docker 20.10 with `--add-host=host.docker.internal:host-gateway`.)
 ---
 
 ## Troubleshooting
+
+### Inspecting logs after a crash
+
+If the container died before you could run `docker logs clm`, the vLLM log is
+still there as long as `/logs` was mounted. With the bind-mount shown in Run:
+
+```bash
+tail -200 "$PWD/clm-logs/vllm.log"
+```
+
+If you used a named volume (`-v clm-logs:/logs`) and the container is gone,
+the volume persists at `/var/lib/docker/volumes/clm-logs/_data/` (Docker
+internals — never edit directly). Read it via a one-shot container:
+
+```bash
+# list the files
+docker run --rm -v clm-logs:/logs alpine:3.20 ls -la /logs/
+
+# copy the latest log out
+mkdir -p "$PWD/clm-logs"
+docker run --rm -v clm-logs:/logs -v "$PWD/clm-logs:/out" alpine:3.20 \
+    sh -c 'cp /logs/vllm.log /out/vllm.log && ls -la /out/'
+
+# tail it without copying
+docker run --rm -v clm-logs:/logs alpine:3.20 tail -n 200 /logs/vllm.log
+```
 
 **`docker: Error response from daemon: could not select device driver "" with
 capabilities: [[gpu]]`.** You forgot the AMD flags and `docker` is interpreting
