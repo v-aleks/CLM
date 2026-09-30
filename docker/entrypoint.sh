@@ -18,7 +18,7 @@
 #   VLLM_UTIL                 - gpu-memory-utilization for vLLM, 0..1 (default: 0.4)
 #   VLLM_MAX_NUM_SEQS         - max concurrent sequences in vLLM (default: 4)
 #   VLLM_DTYPE                - encoder dtype; MUST be float16 on gfx906 (default: float16)
-#   VLLM_LOGGING_LEVEL        - log verbosity for vLLM (default: INFO; WARNING hides EngineCore errors)
+#   VLLM_LOGGING_LEVEL        - log verbosity for vLLM (default: DEBUG; INFO hides EngineCore errors)
 #   VLLM_EXTRA_ARGS           - extra args appended to `vllm serve` (e.g. "--quantization awq_marlot")
 #   SKIP_VLLM                 - if "1", skip starting vLLM (use an external embedder)
 #   CLM_PORT                  - port for the FastAPI server (default: 8700)
@@ -53,7 +53,7 @@ set -euo pipefail
                                    # for amdgpu / pyroc page tables on top of weights.
 : "${VLLM_MAX_NUM_SEQS:=4}"           # pool encoder is small; smaller batches ease KV-cache pressure
 : "${VLLM_DTYPE:=float16}"
-: "${VLLM_LOGGING_LEVEL:=INFO}"       # EngineCore FATAL/ERROR must surface; WARNING hides them
+: "${VLLM_LOGGING_LEVEL:=DEBUG}"      # DEBUG until we know gfx906 boots; flip to INFO once stable
 : "${VLLM_EXTRA_ARGS:=}"
 : "${SKIP_VLLM:=0}"
 : "${CLM_PORT:=8700}"

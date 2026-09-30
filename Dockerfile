@@ -38,6 +38,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     VLLM_LOGGING_LEVEL=INFO \
     # NCCL/RCCL on gfx906 inside Docker without IB / GPU-direct — INFO shows
     # which transport was chosen ("NET/Socket/0") so silent hangs are diagnosable.
+    # VLLM_LOGGING_LEVEL is intentionally NOT set here: entrypoint.sh defaults
+    # it to DEBUG for first-boot diagnostics, and you can flip it to INFO via
+    # `-e VLLM_LOGGING_LEVEL=INFO` once gfx906 boots cleanly.
     NCCL_DEBUG=INFO \
     # gfx906 is reported as "gfx10.1" by the upstream ROCm 6.x runtime, which is
     # the magic value most ROCm-PyTorch and vLLM gfx906 forks expect. Override at
